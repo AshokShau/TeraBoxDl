@@ -129,10 +129,10 @@ func buildAndStart(token string) (*tg.Client, bool) {
 	}
 
 	client, err := tg.NewClient(tg.ClientConfig{
-		AppID:        int32(apiId),
-		AppHash:      ApiHash,
-		FloodHandler: handleFlood,
-		SessionName:  "session",
+		AppID:   int32(apiId),
+		AppHash: ApiHash,
+		//FloodHandler: handleFlood,
+		SessionName: "session",
 	})
 	if err != nil {
 		log.Printf("❌ Failed to create client: %v", err)
