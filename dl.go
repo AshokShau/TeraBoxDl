@@ -3,6 +3,7 @@ package main
 import (
 	"compress/gzip"
 	"fmt"
+	"golang.org/x/net/http2"
 	"io"
 	"log"
 	"mime"
@@ -15,7 +16,6 @@ import (
 	"time"
 )
 
-// DownloadFile downloads any file (video, app, image, etc.) and saves it locally.
 func DownloadFile(urlStr string) (string, string, error) {
 	cacheDir := "cache"
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
@@ -23,17 +23,20 @@ func DownloadFile(urlStr string) (string, string, error) {
 	}
 
 	log.Println("Downloading:", urlStr)
+	tr := &http.Transport{}
+	_ = http2.ConfigureTransport(tr)
+	tr.ForceAttemptHTTP2 = false
 
 	client := &http.Client{
-		Timeout: 300 * time.Second,
+		Transport: tr,
+		Timeout:   300 * time.Second,
 	}
 
 	req, err := http.NewRequest("GET", urlStr, nil)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create request: %w", err)
 	}
-
-	//setFirefoxHeaders(req)
+	//setBrowserHeaders(req)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -45,7 +48,7 @@ func DownloadFile(urlStr string) (string, string, error) {
 		return "", "", fmt.Errorf("bad status: %s", resp.Status)
 	}
 
-	// Handle gzip encoding if needed
+	// Handle gzip encoding
 	var body io.ReadCloser = resp.Body
 	if resp.Header.Get("Content-Encoding") == "gzip" {
 		body, err = gzip.NewReader(resp.Body)
@@ -55,7 +58,6 @@ func DownloadFile(urlStr string) (string, string, error) {
 		defer body.Close()
 	}
 
-	// Determine filename and MIME type
 	mimeType := strings.Split(resp.Header.Get("Content-Type"), ";")[0]
 	filename, err := determineFilename(urlStr, resp.Header)
 	if err != nil {
@@ -66,10 +68,10 @@ func DownloadFile(urlStr string) (string, string, error) {
 			filename += exts[0]
 		}
 	}
+
 	filename = sanitizeFilename(filename)
 	filePath := filepath.Join(cacheDir, filename)
 
-	// Save the file
 	out, err := os.Create(filePath)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create file: %w", err)
@@ -91,6 +93,18 @@ func DownloadFile(urlStr string) (string, string, error) {
 	return filePath, mimeType, nil
 }
 
+func setBrowserHeaders(req *http.Request) {
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:115.0) Gecko/20100101 Firefox/115.0")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	req.Header.Set("Sec-Fetch-User", "?1")
+}
+
 func sanitizeFilename(filename string) string {
 	re := regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
 	safe := re.ReplaceAllString(filename, "_")
@@ -101,28 +115,12 @@ func sanitizeFilename(filename string) string {
 	return safe
 }
 
-func setFirefoxHeaders(req *http.Request) {
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Site", "none")
-	req.Header.Set("Sec-Fetch-User", "?1")
-}
-
 func determineFilename(urlStr string, headers http.Header) (string, error) {
-	// 1. First try Content-Disposition header
 	if cd := headers.Get("Content-Disposition"); cd != "" {
 		if filename := parseContentDisposition(cd); filename != "" {
 			return filename, nil
 		}
 	}
-
-	// 2. Try to extract from URL path
 	if u, err := url.Parse(urlStr); err == nil {
 		if path := u.Path; path != "" && path != "/" {
 			if name := filepath.Base(path); name != "" && name != "." && name != "/" {
@@ -130,13 +128,10 @@ func determineFilename(urlStr string, headers http.Header) (string, error) {
 			}
 		}
 	}
-
-	// 3. Fallback to URL-based name
 	return generateUrlBasedFilename(urlStr), nil
 }
 
 func generateUrlBasedFilename(urlStr string) string {
-	// Clean the URL to create a filename
 	clean := strings.NewReplacer(
 		"https://", "",
 		"http://", "",
@@ -146,8 +141,6 @@ func generateUrlBasedFilename(urlStr string) string {
 		"&", "_",
 		"=", "_",
 	).Replace(urlStr)
-
-	// Limit length and add timestamp
 	if len(clean) > 50 {
 		clean = clean[:50]
 	}
@@ -155,7 +148,6 @@ func generateUrlBasedFilename(urlStr string) string {
 }
 
 func parseContentDisposition(cd string) string {
-	// Look for filename="..." or filename=...
 	re := regexp.MustCompile(`filename\*?=['"]?(?:UTF-\d['"]*)?([^;"']*)['"]?`)
 	matches := re.FindStringSubmatch(cd)
 	if len(matches) > 1 {
