@@ -17,4 +17,3 @@ WORKDIR /app
 COPY --from=builder /app/teraboxdl .
 
 CMD ["./teraboxdl"]
-CMD ["./teraboxdl"]

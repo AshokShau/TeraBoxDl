@@ -26,27 +26,25 @@ func filterTerabox(m *tg.NewMessage) bool {
 	if m.IsCommand() || text == "" || m.IsForward() || m.Message.ViaBotID == m.Client.Me().ID {
 		return false
 	}
-	teraboxRegex := regexp.MustCompile(`(?i)(?:https?://)?(?:www\.)?(?:mirrobox\.com|nephobox\.com|freeterabox\.com|1024tera\.com|1024terabox\.com|terabox\.com|4funbox\.com|terabox\.app|terabox\.fun|tibibox\.com|momerybox\.com|teraboxapp\.com|4funbox\.co)/(?:s/[a-zA-Z0-9_-]+|sharing/link\?surl=[a-zA-Z0-9_-]+)`)
 
+	teraboxRegex := regexp.MustCompile(`(?i)(?:https?://)?(?:www\.)?(?:mirrobox\.com|nephobox\.com|freeterabox\.com|1024tera\.com|1024terabox\.com|terabox\.com|4funbox\.com|terabox\.app|terabox\.fun|tibibox\.com|momerybox\.com|teraboxapp\.com|4funbox\.co)/(?:s/[a-zA-Z0-9_-]+|sharing/link\?surl=[a-zA-Z0-9_-]+)`)
 	match := teraboxRegex.MatchString(text)
 	return match
 }
 
 func teraBoxHandle(m *tg.NewMessage) error {
 	shareURL := m.Text()
-
-	reply, err := m.Reply(fmt.Sprintf("🔍 Processing...\n\n<b>%s</b>", html.EscapeString(shareURL)), tg.SendOptions{
+	reply, err := m.Reply(fmt.Sprintf("🔍 Processing TeraBox link...\n\n<b>%s</b>", html.EscapeString(shareURL)), tg.SendOptions{
 		ParseMode: tg.HTML,
 	})
-
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to send initial message: %w", err)
 	}
 
 	info, err := getTeraBoxInfo(shareURL)
 	if err != nil {
-		_, _ = reply.Edit("❌ Error: " + html.EscapeString(err.Error()))
-		return err
+		_, _ = reply.Edit("❌ Error getting file info: " + html.EscapeString(err.Error()))
+		return fmt.Errorf("getTeraBoxInfo failed: %w", err)
 	}
 
 	if len(info.List) == 0 {
@@ -56,39 +54,76 @@ func teraBoxHandle(m *tg.NewMessage) error {
 
 	var text strings.Builder
 	keyboard := tg.NewKeyboard()
-
-	for _, file := range info.List {
+	var downloadErrors []error
+	for i, file := range info.List {
 		filename := html.EscapeString(file.ServerFilename)
 		sizeReadable := formatBytes(file.Size)
-		dlink := file.Dlink
-		direct := file.DirectLink
-		stream := file.StreamURL
-
-		// Append file info to message
-		text.WriteString(fmt.Sprintf("📁 <b>%s</b>\n📦 <code>%s</code> <a href=\"%s\">Stream</a>\n\n", filename, sizeReadable, stream))
-
-		// Add buttons in a row
 		buttons := []tg.KeyboardButton{
-			tg.Button.URL("📥 CDN", dlink),
-			tg.Button.URL("⚡ Fast CDN", direct),
+			tg.Button.URL("📥 CDN", file.Dlink),
+			tg.Button.URL("⚡ Fast CDN", file.DirectLink),
 		}
 		keyboard.AddRow(buttons...)
+		fileMsg, err := reply.Reply(fmt.Sprintf("⬇️ Downloading %d/%d: <b>%s</b> (%s)",
+			i+1, len(info.List), filename, sizeReadable), tg.SendOptions{
+			ParseMode: tg.HTML,
+		})
+
+		if err != nil {
+			downloadErrors = append(downloadErrors, fmt.Errorf("failed to send download message for %s: %w", filename, err))
+			continue
+		}
+
+		path, mimeType, err := DownloadFile(file.DirectLink)
+		if err != nil {
+			_, _ = fileMsg.Edit(fmt.Sprintf("❌ Failed to download: <b>%s</b>\nError: %s",
+				filename, html.EscapeString(err.Error())), tg.SendOptions{
+				ParseMode: tg.HTML,
+			})
+			downloadErrors = append(downloadErrors, fmt.Errorf("download failed for %s: %w", filename, err))
+			continue
+		}
+		defer func(name string) {
+			_ = os.Remove(name)
+		}(path)
+
+		progress := tg.NewProgressManager(4)
+		progress.Edit(tg.MediaDownloadProgress(fileMsg, progress))
+
+		_, err = fileMsg.Edit(fmt.Sprintf("✅ Downloaded: <b>%s</b>", filename), tg.SendOptions{
+			Media:     path,
+			MimeType:  mimeType,
+			ParseMode: tg.HTML,
+		})
+		if err != nil {
+			downloadErrors = append(downloadErrors, fmt.Errorf("failed to send file %s: %w", filename, err))
+			continue
+		}
+
+		text.WriteString(fmt.Sprintf(
+			"📁 <b>%s</b>\n📦 %s | <a href=\"%s\">Stream</a>\n\n",
+			filename, sizeReadable, file.StreamURL,
+		))
 	}
+
 	keyboard.AddRow(
 		tg.Button.URL("🛠️ Source Code", "https://github.com/AshokShau/TeraBoxDl"),
 	)
 
-	_, err = reply.Edit(text.String(), tg.SendOptions{
+	summary := fmt.Sprintf("🎉 <b>Download Complete</b>\n\n%s", text.String())
+	if len(downloadErrors) > 0 {
+		summary += fmt.Sprintf("\n⚠️ <i>%d files failed to download</i>", len(downloadErrors))
+	}
+
+	_, err = reply.Edit(summary, tg.SendOptions{
 		ParseMode:   tg.HTML,
 		ReplyMarkup: keyboard.Build(),
 		LinkPreview: false,
 	})
 
 	if err != nil {
-		_, _ = reply.Edit("❌ Error: " + html.EscapeString(err.Error()))
-		return err
+		return fmt.Errorf("failed to send summary: %w", err)
 	}
-	return err
+	return nil
 }
 
 // buildAndStart initializes and logs into the bot client
