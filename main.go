@@ -82,12 +82,6 @@ func teraBoxHandle(m *tg.NewMessage) error {
 			downloadErrors = append(downloadErrors, fmt.Errorf("download failed for %s: %w", filename, err))
 			continue
 		}
-		defer func(name string) {
-			_ = os.Remove(name)
-		}(path)
-
-		progress := tg.NewProgressManager(4)
-		progress.Edit(tg.MediaDownloadProgress(fileMsg, progress))
 
 		_, err = fileMsg.Edit(fmt.Sprintf("✅ Downloaded: <b>%s</b>", filename), tg.SendOptions{
 			Media:     path,

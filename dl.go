@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"fmt"
 	"io"
 	"log"
@@ -14,20 +15,17 @@ import (
 	"time"
 )
 
-// DownloadFile downloads a file from a direct URL
-// and returns the local path and MIME type
+// DownloadFile downloads any file (video, app, image, etc.) and saves it locally.
 func DownloadFile(urlStr string) (string, string, error) {
 	cacheDir := "cache"
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return "", "", fmt.Errorf("failed to create cache directory: %w", err)
 	}
-	log.Println(urlStr)
+
+	log.Println("Downloading:", urlStr)
 
 	client := &http.Client{
-		Transport: &http.Transport{
-			ResponseHeaderTimeout: 30 * time.Second,
-		},
-		Timeout: 300 * time.Second, // Overall timeout
+		Timeout: 300 * time.Second,
 	}
 
 	req, err := http.NewRequest("GET", urlStr, nil)
@@ -35,7 +33,8 @@ func DownloadFile(urlStr string) (string, string, error) {
 		return "", "", fmt.Errorf("failed to create request: %w", err)
 	}
 
-	setFirefoxHeaders(req)
+	//setFirefoxHeaders(req)
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", fmt.Errorf("request failed: %w", err)
@@ -46,40 +45,60 @@ func DownloadFile(urlStr string) (string, string, error) {
 		return "", "", fmt.Errorf("bad status: %s", resp.Status)
 	}
 
-	mimeType := resp.Header.Get("Content-Type")
-	mimeType = strings.Split(mimeType, ";")[0]
+	// Handle gzip encoding if needed
+	var body io.ReadCloser = resp.Body
+	if resp.Header.Get("Content-Encoding") == "gzip" {
+		body, err = gzip.NewReader(resp.Body)
+		if err != nil {
+			return "", "", fmt.Errorf("gzip error: %w", err)
+		}
+		defer body.Close()
+	}
+
+	// Determine filename and MIME type
+	mimeType := strings.Split(resp.Header.Get("Content-Type"), ";")[0]
 	filename, err := determineFilename(urlStr, resp.Header)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to determine filename: %w", err)
 	}
-
 	if filepath.Ext(filename) == "" {
-		exts, _ := mime.ExtensionsByType(mimeType)
-		if len(exts) > 0 {
+		if exts, _ := mime.ExtensionsByType(mimeType); len(exts) > 0 {
 			filename += exts[0]
 		}
 	}
-
-	filename = filepath.Base(filename)
 	filename = sanitizeFilename(filename)
-
 	filePath := filepath.Join(cacheDir, filename)
 
-	// Create the file
+	// Save the file
 	out, err := os.Create(filePath)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create file: %w", err)
 	}
 	defer out.Close()
 
-	// Write the body to file
-	_, err = io.Copy(out, resp.Body)
+	start := time.Now()
+	written, err := io.Copy(out, body)
 	if err != nil {
 		_ = os.Remove(filePath)
 		return "", "", fmt.Errorf("failed to write file: %w", err)
 	}
+	duration := time.Since(start)
+	speedKB := float64(written) / duration.Seconds() / 1024
+
+	log.Printf("✅ Downloaded: %s (%.2f MB in %.2fs at %.2f KB/s)",
+		filename, float64(written)/1024/1024, duration.Seconds(), speedKB)
 
 	return filePath, mimeType, nil
+}
+
+func sanitizeFilename(filename string) string {
+	re := regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
+	safe := re.ReplaceAllString(filename, "_")
+	safe = strings.Trim(safe, " .")
+	if safe == "" {
+		safe = "file_" + time.Now().Format("20060102_150405")
+	}
+	return safe
 }
 
 func setFirefoxHeaders(req *http.Request) {
@@ -116,16 +135,6 @@ func determineFilename(urlStr string, headers http.Header) (string, error) {
 	return generateUrlBasedFilename(urlStr), nil
 }
 
-func parseContentDisposition(cd string) string {
-	// Look for filename="..." or filename=...
-	re := regexp.MustCompile(`filename\*?=['"]?(?:UTF-\d['"]*)?([^;"']*)['"]?`)
-	matches := re.FindStringSubmatch(cd)
-	if len(matches) > 1 {
-		return matches[1]
-	}
-	return ""
-}
-
 func generateUrlBasedFilename(urlStr string) string {
 	// Clean the URL to create a filename
 	clean := strings.NewReplacer(
@@ -145,18 +154,12 @@ func generateUrlBasedFilename(urlStr string) string {
 	return "download_" + time.Now().Format("20060102_150405") + "_" + clean
 }
 
-func sanitizeFilename(filename string) string {
-	// Remove any characters that might be problematic in filenames
-	re := regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
-	safe := re.ReplaceAllString(filename, "_")
-
-	// Trim spaces and dots from start/end
-	safe = strings.Trim(safe, " .")
-
-	// Ensure not empty
-	if safe == "" {
-		safe = "file_" + time.Now().Format("20060102_150405")
+func parseContentDisposition(cd string) string {
+	// Look for filename="..." or filename=...
+	re := regexp.MustCompile(`filename\*?=['"]?(?:UTF-\d['"]*)?([^;"']*)['"]?`)
+	matches := re.FindStringSubmatch(cd)
+	if len(matches) > 1 {
+		return matches[1]
 	}
-
-	return safe
+	return ""
 }
