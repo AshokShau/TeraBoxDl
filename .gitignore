@@ -1,0 +1,13 @@
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.ou
+vendor/
+go.work
+.idea
+.env
+/downloads
+cachesession.db
+*.dat
